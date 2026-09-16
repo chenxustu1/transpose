@@ -3073,6 +3073,15 @@ public sealed partial class Emitter
 
     private void EmitPostfixUnary(PostfixUnaryExpressionSyntax postfix)
     {
+        // The null-forgiving operator (!) is a C# compile-time construct with no runtime effect.
+        // It must not be emitted as JavaScript — `expr!` is a syntax error in JS (the `!` would be
+        // interpreted as logical NOT, but it appears after an expression, not before an operand).
+        if (postfix.IsKind(SyntaxKind.SuppressNullableWarningExpression))
+        {
+            EmitExpression(postfix.Operand);
+            return;
+        }
+
         // ++ / -- on a 64-bit integer or decimal (see EmitPrefixUnary). Postfix must yield the OLD
         // value; in a void (statement / for-incrementor) context the result is discarded, so the
         // cheaper new-value form suffices.
