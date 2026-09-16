@@ -2,8 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.Text;
 
 namespace Transpose.Translator;
 
@@ -118,6 +120,104 @@ public static class CompilationBuilder
     /// <summary>Assembly name of the base library. Its package id is Transpose.BCL, but the assembly
     /// it ships stays <c>Transpose</c> — that is what a reference has to be matched on.</summary>
     private const string BaseLibraryAssemblyName = "Transpose";
+
+    /// <summary>
+    /// Loads source-generator assemblies, runs them against <paramref name="compilation"/>, and
+    /// returns the compilation with the generated syntax trees merged in. Generator diagnostics
+    /// (errors, warnings) are collected but do not block the build — they are reported later as
+    /// part of the normal diagnostic pass.
+    /// </summary>
+    /// <param name="compilation">The compilation to feed into generators.</param>
+    /// <param name="analyzerPaths">Paths to DLLs containing <c>ISourceGenerator</c> /
+    /// <c>IIncrementalGenerator</c> implementations.</param>
+    /// <param name="additionalFiles">Additional files to supply to generators.</param>
+    /// <returns>A new compilation with the generated syntax trees appended, and any generator
+    /// diagnostics added to the compilation.</returns>
+    public static (CSharpCompilation compilation, IReadOnlyList<Diagnostic> generatorDiags) RunSourceGenerators(
+        CSharpCompilation compilation,
+        IEnumerable<string>? analyzerPaths,
+        IEnumerable<string>? additionalFiles)
+    {
+        var pathList = analyzerPaths?.Where(File.Exists).ToList();
+        if (pathList is null || pathList.Count == 0)
+            return (compilation, Array.Empty<Diagnostic>());
+
+        var generators = new List<ISourceGenerator>();
+        var loadErrors = new List<Diagnostic>();
+
+        foreach (var dllPath in pathList)
+        {
+            try
+            {
+                var asm = Assembly.LoadFrom(dllPath);
+                foreach (var type in asm.GetExportedTypes())
+                {
+                    if (typeof(ISourceGenerator).IsAssignableFrom(type))
+                        generators.Add((ISourceGenerator)Activator.CreateInstance(type)!);
+                }
+            }
+            catch (Exception ex)
+            {
+                loadErrors.Add(Diagnostic.Create(
+                    new DiagnosticDescriptor(
+                        "TPSG001",
+                        "Failed to load source generator",
+                        "Failed to load source generator assembly '{0}': {1}",
+                        "SourceGenerator",
+                        DiagnosticSeverity.Warning,
+                        isEnabledByDefault: true),
+                    Location.None,
+                    Path.GetFileName(dllPath),
+                    ex.Message));
+            }
+        }
+
+        if (generators.Count == 0)
+            return (compilation, loadErrors);
+
+        var additionalTexts = new List<AdditionalText>();
+        if (additionalFiles is not null)
+        {
+            foreach (var af in additionalFiles)
+            {
+                if (File.Exists(af))
+                    additionalTexts.Add(new OnDiskAdditionalFile(af));
+            }
+        }
+
+        var parseOpts = compilation.SyntaxTrees.FirstOrDefault()?.Options as CSharpParseOptions
+                        ?? CSharpParseOptions.Default;
+
+        var driver = CSharpGeneratorDriver.Create(
+            generators,
+            additionalTexts,
+            parseOpts);
+
+        driver = (CSharpGeneratorDriver)driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputComp, out var generatorDiags);
+
+        // Debug: report how many generators were loaded and how many diagnostics were produced
+        System.Console.Error.WriteLine($"[DEBUG] RunSourceGenerators: {generators.Count} generator(s) loaded, {generatorDiags.Length} diagnostic(s) produced");
+
+        var allDiags = loadErrors.Concat(generatorDiags).ToList();
+        return ((CSharpCompilation)outputComp, allDiags);
+    }
+
+    /// <summary>
+    /// A simple <see cref="AdditionalText"/> backed by a file on disk.
+    /// </summary>
+    private sealed class OnDiskAdditionalFile : AdditionalText
+    {
+        private readonly string _path;
+        public OnDiskAdditionalFile(string path) => _path = path;
+
+        public override string Path => _path;
+
+        public override SourceText? GetText(CancellationToken cancellationToken = default)
+        {
+            try { return SourceText.From(File.ReadAllText(_path), System.Text.Encoding.UTF8); }
+            catch { return null; }
+        }
+    }
 
     private static IReadOnlyList<MetadataReference> GetReferenceAssemblies(IEnumerable<string>? extraReferencePaths)
     {

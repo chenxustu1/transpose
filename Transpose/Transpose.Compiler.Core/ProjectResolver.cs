@@ -78,6 +78,15 @@ internal sealed class ResolvedProject
     /// <summary>In separate-assembly mode, the built output DLLs of referenced projects — the
     /// consumer extracts their embedded JS/resources instead of recompiling their source.</summary>
     public List<string> ReferencedProjectDlls { get; init; } = new();
+
+    /// <summary>Paths to analyzer/source-generator DLLs referenced by this project — from
+    /// <c>&lt;ProjectReference OutputItemType="Analyzer"&gt;</c> and <c>&lt;Analyzer Include="…"&gt;</c>
+    /// items. The DLLs are loaded at compile time so Roslyn can drive the generators.</summary>
+    public List<string> AnalyzerPaths { get; init; } = new();
+
+    /// <summary>Additional files (<c>&lt;AdditionalFiles Include="…"&gt;</c>) passed to source
+    /// generators. Each entry is the absolute path of the file.</summary>
+    public List<string> AdditionalFiles { get; init; } = new();
 }
 
 internal static class ProjectResolver
@@ -153,8 +162,10 @@ internal static class ProjectResolver
         var projectDirs = new List<string>();
         var projectDlls = new List<string>();
         var roots = NuGetRoots().Where(Directory.Exists).ToList();
+        var analyzerPaths = new List<string>();
+        var additionalFiles = new List<string>();
         CollectProject(csprojPath, sources, references, visitedProjects, projectDirs, roots,
-            separateAssemblies, projectDlls, configuration, isRoot: true);
+            separateAssemblies, projectDlls, configuration, isRoot: true, analyzerPaths, additionalFiles);
 
         return new ResolvedProject
         {
@@ -172,6 +183,8 @@ internal static class ProjectResolver
                                    && !string.Equals(doc.Property("DebugSymbols")?.Trim(), "false", StringComparison.OrdinalIgnoreCase),
             ProjectDirs = projectDirs,
             ReferencedProjectDlls = projectDlls,
+            AnalyzerPaths = analyzerPaths,
+            AdditionalFiles = additionalFiles,
         };
     }
 
@@ -228,7 +241,9 @@ internal static class ProjectResolver
         bool separate,
         List<string> projectDlls,
         string configuration,
-        bool isRoot)
+        bool isRoot,
+        List<string> analyzerPaths,
+        List<string> additionalFiles)
     {
         csprojPath = Path.GetFullPath(csprojPath);
         if (!visited.Add(csprojPath) || !File.Exists(csprojPath)) return;
@@ -263,7 +278,45 @@ internal static class ProjectResolver
             else
             {
                 CollectProject(refPath, sources, references, visited, projectDirs, roots,
-                    separate, projectDlls, configuration, isRoot: false);
+                    separate, projectDlls, configuration, isRoot: false, analyzerPaths, additionalFiles);
+            }
+        }
+
+        // Collect analyzer/source-generator DLLs from <ProjectReference OutputItemType="Analyzer">.
+        // These are pre-built assemblies (built by MSBuild before tps runs) that contain
+        // ISourceGenerator or IIncrementalGenerator implementations.
+        if (isRoot)
+        {
+            foreach (var (pr, _) in doc.Elements("ProjectReference"))
+            {
+                var include = pr.Attribute("Include")?.Value;
+                var outputItemType = pr.Attribute("OutputItemType")?.Value;
+                if (string.IsNullOrWhiteSpace(include) || !string.Equals(outputItemType, "Analyzer", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                var refPath = Path.GetFullPath(Path.Combine(projectDir, include!.Replace('\\', '/')));
+                var refDll = ProjectOutputDll(refPath, configuration);
+                if (refDll is not null && File.Exists(refDll) && !analyzerPaths.Contains(refDll))
+                    analyzerPaths.Add(refDll);
+            }
+
+            // Collect <Analyzer Include="..."> items (NuGet package analyzers/generators).
+            foreach (var (el, _) in doc.Elements("Analyzer"))
+            {
+                var inc = el.Attribute("Include")?.Value;
+                if (string.IsNullOrWhiteSpace(inc)) continue;
+                var fullPath = Path.GetFullPath(Path.Combine(projectDir, inc!.Replace('\\', '/')));
+                if (File.Exists(fullPath) && !analyzerPaths.Contains(fullPath))
+                    analyzerPaths.Add(fullPath);
+            }
+
+            // Collect <AdditionalFiles Include="..."> items for source generators.
+            foreach (var (el, _) in doc.Elements("AdditionalFiles"))
+            {
+                var inc = el.Attribute("Include")?.Value;
+                if (string.IsNullOrWhiteSpace(inc)) continue;
+                var fullPath = Path.GetFullPath(Path.Combine(projectDir, inc!.Replace('\\', '/')));
+                if (File.Exists(fullPath) && !additionalFiles.Contains(fullPath))
+                    additionalFiles.Add(fullPath);
             }
         }
     }
