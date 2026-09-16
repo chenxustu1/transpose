@@ -395,7 +395,9 @@ internal static class ProjectBuild
                 minChunkBytes: MinChunkBytes(options, tpscfg),
                 maxChunkBytes: tpscfg?.ModuleMaxChunkBytes ?? Emitter.DefaultMaxChunkBytes,
                 alsoEmitBundle: alsoEmitBundle,
-                chunkOracle: chunkOracle);
+                chunkOracle: chunkOracle,
+                analyzerPaths: project.AnalyzerPaths,
+                additionalFiles: project.AdditionalFiles);
         }
         catch (Exception ex)
         {
@@ -885,7 +887,9 @@ internal static class ProjectBuild
                 chunkOracle: ChunkOracle.TryLoad(project.ProjectDir),
                 // …and the single bundle alongside them, for the same reason: a package ships every
                 // variant, because which one is wanted is the consuming build's decision.
-                alsoEmitBundle: tpscfg is { OutputByModule: true });
+                alsoEmitBundle: tpscfg is { OutputByModule: true },
+                analyzerPaths: project.AnalyzerPaths,
+                additionalFiles: project.AdditionalFiles);
         }
         catch (Exception ex) { ReportCrash($"Translator on '{Path.GetFileName(csproj)}'", ex, log); return false; }
 

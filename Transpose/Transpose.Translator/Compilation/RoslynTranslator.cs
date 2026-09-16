@@ -92,7 +92,9 @@ public sealed class RoslynTranslator
         int minChunkBytes = Emitter.DefaultMinChunkBytes,
         int maxChunkBytes = Emitter.DefaultMaxChunkBytes,
         bool alsoEmitBundle = false,
-        ChunkOracle? chunkOracle = null)
+        ChunkOracle? chunkOracle = null,
+        IEnumerable<string>? analyzerPaths = null,
+        IEnumerable<string>? additionalFiles = null)
     {
         CompileProgress.Report("parsing sources + resolving references");
         var compilation = PhaseTimings.Measure("build compilation (parse + references)", () =>
@@ -100,6 +102,17 @@ public sealed class RoslynTranslator
                 sources, assemblyName, languageVersion,
                 extraReferencePaths: extraReferencePaths,
                 preprocessorSymbols: preprocessorSymbols));
+
+        // Run source generators if any are referenced.
+        IReadOnlyList<Diagnostic> generatorDiags = Array.Empty<Diagnostic>();
+        if (analyzerPaths?.Any() == true)
+        {
+            CompileProgress.Report("running source generators");
+            var (genCompilation, genDiags) = PhaseTimings.Measure("run source generators", () =>
+                CompilationBuilder.RunSourceGenerators(compilation, analyzerPaths, additionalFiles));
+            compilation = genCompilation;
+            generatorDiags = genDiags;
+        }
 
         // The declaration-surface hash of every file, for the *next* build's cache. Computed from the
         // trees this build already parsed, so it costs one extra walk rather than a second parse.
@@ -209,6 +222,7 @@ public sealed class RoslynTranslator
 
         diagnostics.AddRange(unsupported);
         diagnostics.AddRange(roslynErrors);
+        diagnostics.AddRange(generatorDiags);
         if (diagnostics.Count > 0 && diagnostics.Any(d => d.Severity == DiagnosticSeverity.Error))
             return new AssemblyBuildResult(null, null, null, diagnostics);
 
