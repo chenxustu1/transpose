@@ -186,9 +186,6 @@ internal sealed class UnsupportedFeatureScanner : CSharpSyntaxWalker
 
     public override void VisitUsingDirective(UsingDirectiveSyntax node)
     {
-        if (node.GlobalKeyword.RawKind != 0)
-            Report(node, "Global usings are not supported; add per-file using directives instead.");
-
         // An alias (`using MyFile = System.IO.File;`) or a static import (`using static System.IO.File;`)
         // is the only way a denied type can be referenced without its own simple name appearing as an
         // identifier — which is exactly what the fast path in VisitIdentifierName relies on. Rather
