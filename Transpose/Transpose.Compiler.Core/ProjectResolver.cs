@@ -348,7 +348,14 @@ internal static class ProjectResolver
             {
                 var include = pr.Attribute("Include")?.Value;
                 if (string.IsNullOrWhiteSpace(include)) continue;
-                Visit(Path.GetFullPath(Path.Combine(dir, include!.Replace('\\', '/'))), isRoot: false);
+                var refPath = Path.GetFullPath(Path.Combine(dir, include!.Replace('\\', '/')));
+                // Skip non-Transpose projects (e.g. source generators, analyzers). These are standard
+                // .NET SDK projects that require MSBuild's full framework resolution (netstandard.dll,
+                // etc.) which tps does not provide. They must be pre-built by `dotnet build` before tps
+                // runs; the pre-built DLL is consumed as a reference, not recompiled from source.
+                var refDoc = ProjectXml.TryLoad(refPath);
+                if (refDoc is not null && !IsTransposeProject(refDoc)) continue;
+                Visit(refPath, isRoot: false);
             }
             if (!isRoot) order.Add(csproj);   // post-order → dependencies precede this project
         }
@@ -756,6 +763,10 @@ internal static class ProjectResolver
                ?? doc.Property("TargetFrameworks")?.Split(';', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim()
                ?? "netstandard2.0";
     }
+
+    /// <summary>True when the project uses the Transpose.Build.Target SDK and can be compiled by tps.</summary>
+    internal static bool IsTransposeProject(ProjectXml doc)
+        => (doc.SdkName ?? "").StartsWith("Transpose.Build.Target", StringComparison.OrdinalIgnoreCase);
 
     // Version ladders per framework family, in ascending order — used to generate the SDK's
     // "<MONIKER>x_y_OR_GREATER" chains (every version up to and including the target's).
